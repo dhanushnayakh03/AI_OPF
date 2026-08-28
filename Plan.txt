@@ -1,0 +1,543 @@
+PROJECT
+AI-Based Optimal Reactive Power Dispatch for Transmission Loss Minimization
+using the IEEE-14 Bus System
+
+
+============================================================
+1. POWER-SYSTEM MODEL
+============================================================
+
+Use:
+    pandapower.networks.case14()
+
+Network:
+    IEEE-14 bus standard transmission system.
+
+Voltage-controlled buses:
+    Bus 1  -> external grid / slack
+    Bus 2  -> generator
+    Bus 3  -> generator
+    Bus 6  -> generator
+    Bus 8  -> generator
+
+CONTROL VARIABLES FOR AI:
+    x = [V_G2, V_G3, V_G6, V_G8]
+
+Keep the slack-bus voltage fixed at the standard case14 value.
+Do NOT replace it arbitrarily with 1.0 pu.
+
+
+============================================================
+2. BASELINE POWER FLOW
+============================================================
+
+Run:
+
+    pp.runpp(net)
+
+Calculate:
+
+    P_loss_base = sum(net.res_line.pl_mw)
+                + relevant transformer losses if present
+
+Record:
+
+    - total active-power loss
+    - bus voltage magnitudes
+    - line loading
+    - generator P and Q
+    - slack-bus power
+
+This is the "normal operation" benchmark.
+
+
+============================================================
+3. PHYSICAL OBJECTIVE
+============================================================
+
+The reason reactive-power/voltage control can reduce loss is:
+
+    S^2 = P^2 + Q^2
+
+    I ≈ S / (sqrt(3) V)
+
+    P_loss ≈ 3 I^2 R
+
+Therefore:
+
+    lower unnecessary reactive power flow
+                 ↓
+             lower current
+                 ↓
+             lower I²R loss
+
+The AI does NOT change conductor resistance.
+
+It learns a better operating point of the existing grid.
+
+
+============================================================
+4. CONTROL / OPF PROBLEM
+============================================================
+
+For every load condition, solve an AC optimal power-flow problem.
+
+Decision variables may include:
+
+    - generator active/reactive outputs
+    - generator voltage magnitudes
+    - slack generation
+
+BUT:
+
+IMPORTANT:
+We need to configure the OPF so that our benchmark objective is
+MINIMUM TRANSMISSION LOSS.
+
+Do not simply run a default OPF and call it loss minimization.
+
+Subject to:
+
+    V_min <= V_i <= V_max
+
+    Q_G,min <= Q_G <= Q_G,max
+
+    P_G,min <= P_G <= P_G,max
+
+    line_loading <= maximum allowed loading
+
+Pandapower supports these voltage, generator and branch constraints
+through its OPF formulation.
+
+
+============================================================
+5. DEFINE WHAT THE AI IS ALLOWED TO CONTROL
+============================================================
+
+For the first version:
+
+    AI outputs ONLY:
+
+    [V_G2, V_G3, V_G6, V_G8]
+
+All other quantities are obtained from the AC power-flow equations.
+
+This keeps the AI problem small and interpretable.
+
+The OPF is used to find the optimal values of these voltage setpoints.
+
+If the initial experiment is insufficient, add transformer taps later.
+
+
+============================================================
+6. GENERATE OPERATING CONDITIONS
+============================================================
+
+Create many different load scenarios.
+
+For each of the 11 load buses:
+
+    P_L,i' = λ_P,i * P_L,i(base)
+
+    Q_L,i' = λ_Q,i * Q_L,i(base)
+
+For the first experiment:
+
+    λ ∈ [0.8, 1.2]
+
+Use random sampling rather than only uniform global scaling.
+
+Example:
+
+    Scenario 1:
+        P loads vary by different amounts
+        Q loads vary by different amounts
+
+    Scenario 2:
+        another random operating condition
+
+    ...
+
+Generate approximately:
+
+    500–2000 scenarios
+
+
+============================================================
+7. INPUT VECTOR
+============================================================
+
+The proposed input is:
+
+    u =
+    [P_L1,...,P_L11,
+     Q_L1,...,Q_L11]
+
+Therefore:
+
+    u ∈ R^22
+
+IMPORTANT:
+The vector should contain the actual 11 load-bus quantities,
+not buses 2...14 blindly, because not every bus in IEEE-14 is a load bus.
+
+Construct the vector explicitly from:
+
+    net.load.bus
+
+and keep a fixed bus ordering.
+
+So:
+
+    Input dimension = 22
+
+
+============================================================
+8. GROUND-TRUTH LABEL GENERATION
+============================================================
+
+For every operating condition:
+
+    1. Modify the loads.
+    2. Configure the loss-minimizing AC-OPF.
+    3. Run:
+
+           pp.runopp(net)
+
+    4. Check convergence/status.
+    5. Extract optimal generator voltage setpoints:
+
+           x* =
+           [V_G2*, V_G3*, V_G6*, V_G8*]
+
+    6. Run a normal AC power flow using x*:
+
+           pp.runpp(net)
+
+    7. Calculate the ACTUAL physical transmission loss.
+
+Store:
+
+    Input:
+        u
+
+    Label:
+        x*
+
+    Validation target:
+        P_loss_OPF
+
+
+This gives:
+
+    u → x*
+
+which becomes our supervised-learning dataset.
+
+
+============================================================
+9. IMPORTANT DATA CLEANING
+============================================================
+
+Do NOT blindly keep every OPF result.
+
+For each scenario require:
+
+    OPF converged
+    AND
+    validation AC power flow converged
+    AND
+    all voltage constraints satisfied
+    AND
+    all line constraints satisfied
+
+Discard infeasible/non-converged scenarios.
+
+Otherwise the neural network will learn bad labels.
+
+
+============================================================
+10. AI MODEL
+============================================================
+
+Use a small feed-forward neural network.
+
+Architecture:
+
+    Input(22)
+       ↓
+    Dense(64)
+       ↓
+      ReLU
+       ↓
+    Dense(32)
+       ↓
+      ReLU
+       ↓
+    Dense(4)
+       ↓
+    scaled-sigmoid
+       ↓
+    [V_G2,V_G3,V_G6,V_G8]
+
+
+============================================================
+11. OUTPUT CONSTRAINT
+============================================================
+
+Use:
+
+    V_Gi =
+        V_min + sigmoid(z_i)(V_max - V_min)
+
+For example:
+
+    V_min = 0.95 pu
+    V_max = 1.05 pu
+
+This guarantees:
+
+    0.95 <= V_Gi <= 1.05
+
+for every neural-network prediction.
+
+IMPORTANT:
+Use the actual voltage limits adopted by the benchmark consistently.
+Do not silently impose different limits on the AI and OPF.
+
+
+============================================================
+12. TRAINING
+============================================================
+
+Train the network to reproduce the OPF control solution:
+
+    Loss_ML =
+        mean(||x_pred - x_OPF||²)
+
+Split data:
+
+    70% training
+    15% validation
+    15% test
+
+The test set must contain operating conditions never seen during training.
+
+
+============================================================
+13. AI DEPLOYMENT / VALIDATION
+============================================================
+
+For every unseen test condition:
+
+    load condition
+         ↓
+        AI
+         ↓
+    predicted:
+        [V_G2,V_G3,V_G6,V_G8]
+         ↓
+    insert into actual IEEE-14 network
+         ↓
+    AC power flow
+         ↓
+    calculate actual P_loss
+
+
+IMPORTANT:
+Never let the neural network predict the loss itself.
+
+The AC power-flow model is the physical evaluator.
+
+
+============================================================
+14. THREE-WAY COMPARISON
+============================================================
+
+For every test scenario calculate:
+
+    A. BASELINE
+       Normal operating setpoints
+       → P_loss_base
+
+    B. OPTIMAL
+       AC-OPF solution
+       → P_loss_OPF
+
+    C. AI
+       Neural-network controls
+       → P_loss_AI
+
+
+Target:
+
+    P_loss_OPF <= P_loss_AI < P_loss_base
+
+AI should be close to the OPF solution.
+
+
+============================================================
+15. METRICS
+============================================================
+
+Loss reduction:
+
+    Loss reduction (%) =
+        (P_loss_base - P_loss_AI)
+        / P_loss_base × 100
+
+
+AI optimality gap:
+
+    Optimality gap (%) =
+        (P_loss_AI - P_loss_OPF)
+        / P_loss_OPF × 100
+
+
+Constraint violation rate:
+
+    number of AI test cases violating constraints
+    ------------------------------------------------
+                  total AI test cases
+
+
+Also measure:
+
+    average OPF computation time
+    average AI inference time
+
+
+============================================================
+16. REQUIRED FIGURES
+============================================================
+
+FIGURE 1:
+    IEEE-14 network topology
+
+FIGURE 2:
+    Baseline vs AI vs OPF transmission loss
+
+FIGURE 3:
+    P_loss_AI vs P_loss_OPF
+    with y = x reference line
+
+FIGURE 4:
+    Bus voltage profile:
+        baseline vs AI vs OPF
+
+FIGURE 5:
+    Line loading:
+        baseline vs AI
+
+FIGURE 6:
+    Computation time:
+        AC-OPF vs AI inference
+
+
+============================================================
+17. FINAL DEMONSTRATION
+============================================================
+
+Show one completely unseen load scenario.
+
+Example flow:
+
+    New load condition
+           ↓
+        AI model
+           ↓
+    predicted generator
+    voltage setpoints
+           ↓
+      AC power flow
+           ↓
+      lower transmission
+          loss
+           ↓
+    verify all constraints
+
+Then compare against:
+
+    normal operation
+    exact AC-OPF
+
+
+============================================================
+18. FINAL CLAIM
+============================================================
+
+The project should claim:
+
+"We train a neural-network surrogate for loss-minimizing
+optimal reactive-power dispatch. The model learns the mapping
+from changing load conditions to optimal generator voltage
+setpoints and is evaluated using a full AC power-flow model.
+Its performance is compared against normal operation and the
+AC-OPF benchmark."
+
+Do NOT claim:
+
+"AI discovers a new method of reducing transmission loss."
+
+The contribution is demonstrating that an AI surrogate can
+reproduce a conventional loss-minimizing control solution quickly
+for unseen operating conditions.
+
+
+============================================================
+19. IMPLEMENTATION ORDER
+============================================================
+
+PHASE 1:
+    Load IEEE-14
+    Run power flow
+    Understand buses/generators/loads
+    Calculate baseline loss
+
+PHASE 2:
+    Configure and verify loss-minimizing AC-OPF
+    for ONE load condition
+
+PHASE 3:
+    Generate ~500 scenarios
+    Solve OPF
+    Validate every solution with AC power flow
+
+PHASE 4:
+    Build 22 → 64 → 32 → 4 neural network
+
+PHASE 5:
+    Train/test
+
+PHASE 6:
+    Compare:
+        baseline
+        OPF
+        AI
+
+PHASE 7:
+    Produce final plots and report
+
+
+============================================================
+FINAL PIPELINE
+============================================================
+
+              LOAD STATE (22)
+                     │
+                     ↓
+                AI MODEL
+                     │
+                     ↓
+          [VG2, VG3, VG6, VG8]
+                     │
+                     ↓
+              AC POWER FLOW
+                     │
+          ┌──────────┼──────────┐
+          ↓          ↓          ↓
+        LOSS       VOLTAGE    LOADING
+          │
+          ↓
+    Compare with OPF
+    and baseline
