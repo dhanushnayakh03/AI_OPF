@@ -181,48 +181,459 @@ def run_environment_test(num_scenarios=200):
     os.makedirs("figures", exist_ok=True)
     
     # 1. Topology with Outage Line Highlighted
-    fig, ax = plt.subplots(figsize=(10, 8))
-    fig.patch.set_facecolor('#f8f9fa')
-    ax.set_facecolor('#f8f9fa')
-    pplot.create_generic_coordinates(net, overwrite=True)
-    import json
-    if not hasattr(net, 'bus_geodata'):
-        net.bus_geodata = pd.DataFrame(index=net.bus.index, columns=['x', 'y'])
-        if 'geo' in net.bus.columns:
-            for idx in net.bus.index:
-                if not pd.isna(net.bus.loc[idx, 'geo']):
-                    geo_dict = json.loads(net.bus.loc[idx, 'geo'])
-                    net.bus_geodata.loc[idx, 'x'] = geo_dict['coordinates'][0]
-                    net.bus_geodata.loc[idx, 'y'] = geo_dict['coordinates'][1]
-    bc = pplot.create_bus_collection(net, size=0.2, color='#3b82f6', zorder=10)
-    
-    # Highlight the tripped line by not drawing it or drawing it differently.
-    # In env3, line index 5 is out of service.
-    # We can draw the in-service lines normally, and the out-of-service line as dashed red.
-    in_service_lines = net.line[net.line.in_service == True].index
-    out_service_lines = net.line[net.line.in_service == False].index
-    
-    lc_in = pplot.create_line_collection(net, lines=in_service_lines, color='#9ca3af', linewidths=2., use_bus_geodata=True)
-    collections = [lc_in]
-    
-    if len(out_service_lines) > 0:
-        lc_out = pplot.create_line_collection(net, lines=out_service_lines, color='#ef4444', linewidths=2.5, linestyles='dashed', use_bus_geodata=True)
-        collections.append(lc_out)
-        
-    tc = pplot.create_trafo_collection(net, size=0.3, color='#10b981')
-    ext = pplot.create_ext_grid_collection(net, size=0.4, orientation=-1.5, color='#ef4444')
-    gen = pplot.create_gen_collection(net, size=0.3, color='#f59e0b')
-    load = pplot.create_load_collection(net, size=0.3, color='#8b5cf6')
-    
-    collections.extend([tc, bc, ext, gen, load])
-    pplot.draw_collections(collections, ax=ax)
-    
-    for i, row in net.bus_geodata.iterrows():
-        ax.annotate(str(i), (row.x, row.y + 0.3), ha='center', va='bottom', fontsize=9, fontweight='bold', color='#1f2937')
-    ax.set_title("Figure 1: IEEE-14 Topology with N-1 Line Outage (Line 4-5 Tripped)", fontsize=14, fontweight='bold', color='#111827', pad=15)
-    ax.axis('off')
+    # ================================================================
+    # 1. CLEAN IEEE-14 TOPOLOGY (N-1 CONTINGENCY)
+    # ================================================================
+    fig, ax = plt.subplots(figsize=(14, 9))
+
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    # ------------------------------------------------
+    # Carefully chosen coordinates
+    # ------------------------------------------------
+    # (pandapower uses 0-based indices internally)
+    pos = {
+        0:  (0.0,  2.5),    # Bus 1
+        1:  (2.2,  3.8),    # Bus 2
+        2:  (2.2,  1.2),    # Bus 3
+        3:  (4.5,  2.5),    # Bus 4
+        4:  (6.8,  3.8),    # Bus 5
+        5:  (6.8,  1.2),    # Bus 6
+        6:  (9.2,  3.8),    # Bus 7
+        7:  (9.2,  1.2),    # Bus 8
+        8:  (11.5, 3.8),    # Bus 9
+        9:  (11.5, 1.2),    # Bus 10
+        10: (13.8, 3.8),    # Bus 11
+        11: (13.8, 1.2),    # Bus 12
+        12: (16.0, 3.8),    # Bus 13
+        13: (16.0, 1.2),    # Bus 14
+    }
+
+    # ------------------------------------------------
+    # Helper: draw a clean branch
+    # ------------------------------------------------
+    def draw_branch(bus1, bus2, color="#64748b",
+                    lw=2.2, linestyle="-",
+                    curve=0.0, zorder=1):
+
+        x1, y1 = pos[bus1]
+        x2, y2 = pos[bus2]
+
+        if curve == 0:
+            ax.plot(
+                [x1, x2],
+                [y1, y2],
+                color=color,
+                linewidth=lw,
+                linestyle=linestyle,
+                solid_capstyle="round",
+                zorder=zorder
+            )
+        else:
+            from matplotlib.path import Path
+            from matplotlib.patches import PathPatch
+
+            dx = x2 - x1
+            dy = y2 - y1
+            length = np.sqrt(dx**2 + dy**2)
+
+            # perpendicular displacement
+            px = -dy / length * curve
+            py = dx / length * curve
+
+            cx = (x1 + x2) / 2 + px
+            cy = (y1 + y2) / 2 + py
+
+            path = Path(
+                [
+                    (x1, y1),
+                    (cx, cy),
+                    (x2, y2)
+                ],
+                [Path.MOVETO, Path.CURVE3, Path.CURVE3]
+            )
+
+            patch = PathPatch(
+                path,
+                facecolor="none",
+                edgecolor=color,
+                linewidth=lw,
+                linestyle=linestyle,
+                zorder=zorder
+            )
+
+            ax.add_patch(patch)
+
+
+    # ------------------------------------------------
+    # Transmission lines
+    # ------------------------------------------------
+    # Explicitly draw the IEEE-14 branches.
+    # Small curves are used only where they improve readability.
+
+    branches = [
+        (0, 1,  0.0),    # 1-2
+        (0, 4,  0.45),   # 1-5
+
+        (1, 2,  0.0),    # 2-3
+        (1, 3,  0.0),    # 2-4
+        (1, 4, -0.35),   # 2-5
+
+        (2, 3,  0.0),    # 3-4
+        (3, 4,  0.0),    # 4-5
+
+        (4, 5,  0.0),    # 5-6
+
+        (5, 10,  0.45),  # 6-11
+        (5, 11,  0.0),   # 6-12
+        (5, 12, -0.45),  # 6-13
+
+        (6, 7,  0.0),    # 7-8
+        (6, 8,  0.0),    # 7-9
+
+        (8, 9,  0.0),    # 9-10
+        (8, 13, 0.45),   # 9-14
+
+        (9, 10, 0.0),    # 10-11
+
+        (11, 12, 0.0),   # 12-13
+        (12, 13, 0.0),   # 13-14
+    ]
+
+    # In env3: Identify out-of-service branches (N-1 contingency on Line 4-5)
+    outage_lines = set()
+    for _, line in net.line[net.line.in_service == False].iterrows():
+        fb, tb = int(line.from_bus), int(line.to_bus)
+        outage_lines.add((min(fb, tb), max(fb, tb)))
+
+    for b1, b2, curve in branches:
+        pair = (min(b1, b2), max(b1, b2))
+        if pair in outage_lines:
+            draw_branch(b1, b2, color="#ef4444", lw=2.5, linestyle="--", curve=curve, zorder=4)
+        else:
+            draw_branch(b1, b2, curve=curve)
+
+
+    # ------------------------------------------------
+    # Transformers
+    # ------------------------------------------------
+    # Draw transformers over the corresponding branches.
+    # Green is deliberately thinner than before.
+
+    transformers = [
+        (3, 6),   # 4-7
+        (3, 8),   # 4-9
+        (4, 5),   # 5-6
+    ]
+
+    for b1, b2 in transformers:
+
+        x1, y1 = pos[b1]
+        x2, y2 = pos[b2]
+
+        ax.plot(
+            [x1, x2],
+            [y1, y2],
+            color="#10b981",
+            linewidth=3.5,
+            zorder=3
+        )
+
+        # Transformer marker
+        xm = (x1 + x2) / 2
+        ym = (y1 + y2) / 2
+
+        ax.scatter(
+            xm, ym,
+            s=110,
+            facecolor="white",
+            edgecolor="#10b981",
+            linewidth=2,
+            zorder=5
+        )
+
+        ax.text(
+            xm, ym,
+            "T",
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+            color="#059669",
+            zorder=6
+        )
+
+
+    # ------------------------------------------------
+    # Determine buses containing generators and loads
+    # ------------------------------------------------
+    ext_grid_buses = set(net.ext_grid.bus.astype(int))
+    gen_buses = set(net.gen.bus.astype(int))
+    load_buses = set(net.load.bus.astype(int))
+
+
+    # ------------------------------------------------
+    # Bus nodes
+    # ------------------------------------------------
+    for bus, (x, y) in pos.items():
+
+        ax.scatter(
+            x, y,
+            s=700,
+            facecolor="white",
+            edgecolor="#2563eb",
+            linewidth=3,
+            zorder=10
+        )
+
+        ax.text(
+            x, y,
+            str(bus + 1),
+            ha="center",
+            va="center",
+            fontsize=12,
+            fontweight="bold",
+            color="#111827",
+            zorder=11
+        )
+
+
+    # ------------------------------------------------
+    # Generator symbols
+    # ------------------------------------------------
+    for bus in gen_buses:
+
+        x, y = pos[bus]
+
+        # connector
+        ax.plot(
+            [x, x],
+            [y + 0.40, y + 0.75],
+            color="#f59e0b",
+            linewidth=1.5,
+            zorder=7
+        )
+
+        ax.scatter(
+            x,
+            y + 0.95,
+            s=300,
+            marker="^",
+            facecolor="#f59e0b",
+            edgecolor="#b45309",
+            linewidth=1.5,
+            zorder=12
+        )
+
+        ax.text(
+            x,
+            y + 0.95,
+            "G",
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+            color="white",
+            zorder=13
+        )
+
+
+    # ------------------------------------------------
+    # Load symbols
+    # ------------------------------------------------
+    for bus in load_buses:
+
+        x, y = pos[bus]
+
+        ax.plot(
+            [x, x],
+            [y - 0.40, y - 0.75],
+            color="#8b5cf6",
+            linewidth=1.5,
+            zorder=7
+        )
+
+        ax.scatter(
+            x,
+            y - 0.95,
+            s=280,
+            marker="v",
+            facecolor="#8b5cf6",
+            edgecolor="#6d28d9",
+            linewidth=1.5,
+            zorder=12
+        )
+
+        ax.text(
+            x,
+            y - 0.95,
+            "L",
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+            color="white",
+            zorder=13
+        )
+
+
+    # ------------------------------------------------
+    # External grid
+    # ------------------------------------------------
+    for bus in ext_grid_buses:
+
+        x, y = pos[bus]
+
+        ax.plot(
+            [x - 0.9, x - 0.4],
+            [y, y],
+            color="#dc2626",
+            linewidth=3,
+            zorder=7
+        )
+
+        ax.scatter(
+            x - 1.05,
+            y,
+            s=280,
+            marker="s",
+            facecolor="#dc2626",
+            edgecolor="#991b1b",
+            linewidth=1.5,
+            zorder=12
+        )
+
+        ax.text(
+            x - 1.05,
+            y,
+            "G",
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+            color="white",
+            zorder=13
+        )
+
+
+    # ------------------------------------------------
+    # Title
+    # ------------------------------------------------
+    ax.set_title(
+        "IEEE 14-Bus Power System Topology",
+        fontsize=20,
+        fontweight="bold",
+        color="#111827",
+        pad=28
+    )
+
+    ax.text(
+        0.5,
+        1.015,
+        "Transmission network structure (Line 4-5 Outage)",
+        transform=ax.transAxes,
+        ha="center",
+        fontsize=11,
+        color="#64748b"
+    )
+
+
+    # ------------------------------------------------
+    # Legend
+    # ------------------------------------------------
+    from matplotlib.lines import Line2D
+
+    legend_elements = [
+        Line2D(
+            [0], [0],
+            marker="o",
+            color="none",
+            markerfacecolor="white",
+            markeredgecolor="#2563eb",
+            markeredgewidth=2.5,
+            markersize=12,
+            label="Bus"
+        ),
+
+        Line2D(
+            [0], [0],
+            marker="^",
+            color="none",
+            markerfacecolor="#f59e0b",
+            markeredgecolor="#b45309",
+            markersize=10,
+            label="Generator"
+        ),
+
+        Line2D(
+            [0], [0],
+            marker="v",
+            color="none",
+            markerfacecolor="#8b5cf6",
+            markeredgecolor="#6d28d9",
+            markersize=10,
+            label="Load"
+        ),
+
+        Line2D(
+            [0], [0],
+            color="#64748b",
+            linewidth=2.2,
+            label="Transmission Line"
+        ),
+
+        Line2D(
+            [0], [0],
+            color="#ef4444",
+            linewidth=2.5,
+            linestyle="--",
+            label="Outage Line (Tripped)"
+        ),
+
+        Line2D(
+            [0], [0],
+            color="#10b981",
+            linewidth=3.5,
+            label="Transformer"
+        ),
+
+        Line2D(
+            [0], [0],
+            color="#dc2626",
+            linewidth=3,
+            label="External Grid"
+        ),
+    ]
+
+    ax.legend(
+        handles=legend_elements,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.04),
+        ncol=4,
+        frameon=False,
+        fontsize=10
+    )
+
+
+    # ------------------------------------------------
+    # Final formatting
+    # ------------------------------------------------
+    ax.set_xlim(-1.8, 17.0)
+    ax.set_ylim(-1.7, 5.2)
+
+    ax.set_aspect("equal")
+    ax.axis("off")
+
     plt.tight_layout()
-    fig.savefig("figures/fig1_topology.png", dpi=300, bbox_inches='tight')
+
+    fig.savefig(
+        "figures/fig1_topology.png",
+        dpi=350,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
     plt.close(fig)
     
     # 2. Loss Comparison
