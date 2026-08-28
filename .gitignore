@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data & Datasets
+dataset.csv
+*.npy
+
+# Model weights
+best_model.pth
+*.pth
+*.pt
+
+# Planning notes / documents
+Plan.txt
+
+# Environments & OS files
+.env
+.venv/
+env/
+venv/
+.DS_Store
